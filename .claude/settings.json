@@ -1,0 +1,87 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Grep",
+      "Glob",
+      "WebSearch",
+      "WebFetch",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git status:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git show:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(curl:*)",
+      "Bash(python3:*)",
+      "Bash(pytest:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run test:*)",
+      "Bash(yarn test:*)",
+      "Bash(go test:*)",
+      "Bash(cargo test:*)",
+      "Bash(make test:*)",
+      "Bash(make check:*)",
+      "Bash(make lint:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(uv run pytest:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(./venv/Scripts/python.exe:*)",
+      "Bash(./venv/bin/python:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Syncing .compass index",
+            "timeout": 30,
+            "command": "if command -v python3 >/dev/null 2>&1; then python3 \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" sync --hook; else python \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" sync --hook; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Checking for a capture opportunity",
+            "timeout": 30,
+            "command": "if command -v python3 >/dev/null 2>&1; then python3 \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-check --hook; else python \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-check --hook; fi"
+          }
+        ]
+      }
+    ],
+    "TeammateIdle": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Recording teammate idle signal",
+            "timeout": 30,
+            "command": "if command -v python3 >/dev/null 2>&1; then python3 \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-signal --hook; else python \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-signal --hook; fi"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "builder|tester|debug|validator|planner|researcher|reviewer|spec-writer|pr-describe",
+        "hooks": [
+          {
+            "type": "command",
+            "statusMessage": "Capturing subagent report",
+            "timeout": 30,
+            "command": "if command -v python3 >/dev/null 2>&1; then python3 \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-signal --hook; else python \"$CLAUDE_PROJECT_DIR/.claude/cli/compass\" capture-signal --hook; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
