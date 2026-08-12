@@ -73,6 +73,17 @@ _RUN_LINE_RE = re.compile(
     r"^(?P<name>\w+)\s+\((?P<path>[\w.]+)\)\s+\.\.\.\s+(?P<status>ok|FAIL|ERROR|skipped.*)\s*$"
 )
 
+# A test's status is not always on its own line. A docstring prints the
+# header `name (path)` alone with the status trailing the docstring's first
+# line; a test that writes to stderr interleaves that output after `... `
+# and the bare status token lands alone on a later line. Headers, trailers,
+# and bare status lines are matched separately and joined by the parser.
+_RUN_HEADER_RE = re.compile(
+    r"^(?P<name>\w+)\s+\((?P<path>[\w.]+)\)(?:\s+\.\.\..*)?$"
+)
+_RUN_TRAILER_RE = re.compile(r"\.\.\.\s+(?P<status>ok|FAIL|ERROR|skipped.*)\s*$")
+_RUN_BARE_STATUS_RE = re.compile(r"^(?P<status>ok|FAIL|ERROR|skipped.*)\s*$")
+
 
 # --------------------------------------------------------------------------
 # git access - the sole source of truth for checkpointed content and
@@ -561,16 +572,41 @@ def _parse_run_evidence(text):
     evidence is simply absent from this map - callers treat that as "not
     proven passed", the same as any status other than `ok`."""
     statuses = {}
+    pending = None  # (name, path) header awaiting its docstring-line trailer
     for line in text.splitlines():
-        match = _RUN_LINE_RE.match(line.strip())
+        stripped = line.strip()
+        match = _RUN_LINE_RE.match(stripped)
         if not match:
+            header = _RUN_HEADER_RE.match(stripped)
+            if header:
+                pending = (header.group("name"), header.group("path"))
+                continue
+            if pending is not None:
+                trailer = _RUN_TRAILER_RE.search(stripped) or _RUN_BARE_STATUS_RE.match(stripped)
+                if trailer:
+                    name, path = pending
+                    pending = None
+                    _record_run_status(statuses, name, path, trailer.group("status"))
             continue
-        name, path, raw_status = match.group("name"), match.group("path"), match.group("status")
-        class_name = path.rsplit(".", 1)[-1] if "." in path else None
-        status = "ok" if raw_status == "ok" else ("skipped" if raw_status.startswith("skipped") else raw_status.lower())
-        statuses[(class_name, name)] = status
-        statuses[(None, name)] = status
+        pending = None
+        _record_run_status(
+            statuses, match.group("name"), match.group("path"), match.group("status")
+        )
     return statuses
+
+
+def _record_run_status(statuses, name, path, raw_status):
+    # unittest -v prints the parenthesized path as `pkg.Class` on older
+    # Pythons and `pkg.Class.test_name` on newer ones; when the last
+    # segment repeats the test name, the class is the segment before it.
+    parts = path.split(".")
+    if parts[-1] == name and len(parts) >= 2:
+        class_name = parts[-2]
+    else:
+        class_name = parts[-1] if "." in path else None
+    status = "ok" if raw_status == "ok" else ("skipped" if raw_status.startswith("skipped") else raw_status.lower())
+    statuses[(class_name, name)] = status
+    statuses[(None, name)] = status
 
 
 def _print_report(task, record, findings):
