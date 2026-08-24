@@ -37,6 +37,8 @@ DEFAULT_CONFIG = {
     "interval": 12,
     "max_reemits": 3,
     "abandon_after_seconds": 900,
+    "worker_grace_seconds": 600,
+    "no_headless_retry_seconds": 86400,
 }
 
 RUN_LOCK_STALE_SECONDS = 60
@@ -47,6 +49,12 @@ DEFAULT_STATE = {
     "open_opportunity": None,
     "reemits": 0,
     "last_opportunity_at": None,
+    # Flat, not nested under a sub-dict: `_default_state` only deep-copies
+    # `signals`, so a nested value here would share one mutable dict across
+    # every vault loaded in-process.
+    "worker_attempts": 0,
+    "worker_quiet_at": None,
+    "no_headless_at": None,
 }
 
 # Signal kinds that make an opportunity due on their own, independent of the
@@ -161,6 +169,40 @@ def _log_event(vault_root, event, **fields):
             handle.write(json.dumps(row) + "\n")
     except OSError:
         pass
+
+
+def log_event(vault_root, event, **fields):
+    """Public entry point onto the append-only capture log. The in-process
+    callers on this module's own hook path use `_log_event` directly; this
+    alias exists for callers outside it - the worker wrapper runs as a
+    separate process spawned by the hook and has no other way onto the
+    ledger's `worker-*` and `fallback-fired` vocabulary."""
+    _log_event(vault_root, event, **fields)
+
+
+def read_log(vault_root):
+    """Every well-formed row from `.compass/tmp/capture-log.jsonl`, oldest
+    first, or an empty list when the log is absent. Unlike
+    `commands.capture_stats.load_rows`, this applies no known-event filter:
+    a caller reconciling the ledger (`doctor`, the worker wrapper's own
+    tests) wants every row this module's writers produced, not the subset
+    one report's vocabulary currently recognizes. A line that fails to
+    parse or is not a JSON object is skipped rather than raising."""
+    path = _log_path(vault_root)
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
 
 
 def load_config(vault_root):
@@ -295,7 +337,10 @@ def open_opportunity(vault_root, kind, triggers, evidence):
     `open_opportunity` with the new id, resets `reemits` to 0, clears
     `turns_since_capture` and `signals` (the window that produced this
     opportunity is spent; the next one starts counting fresh), and stamps
-    `last_opportunity_at`. Returns the opportunity directory path."""
+    `last_opportunity_at`. Also resets `worker_attempts` to 0 and
+    `worker_quiet_at` to `None`: a prior opportunity's spawn deaths or quiet
+    firing must never carry into this one's fresh fallback ladder. Returns
+    the opportunity directory path."""
     now = _now()
     opened_at = _iso(now)
     opp_id = "OPP-" + now.strftime("%Y%m%dT%H%M%S") + f"{now.microsecond:06d}Z"
@@ -317,6 +362,8 @@ def open_opportunity(vault_root, kind, triggers, evidence):
     state["turns_since_capture"] = 0
     state["signals"] = []
     state["last_opportunity_at"] = opened_at
+    state["worker_attempts"] = 0
+    state["worker_quiet_at"] = None
     save_state(vault_root, state)
     _log_event(vault_root, "opened", id=opp_id, kind=kind, triggers=triggers)
     return directory

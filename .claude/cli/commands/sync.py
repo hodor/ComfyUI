@@ -18,6 +18,7 @@ would block the user's write.
 
 import datetime
 import json
+import os
 import re
 import sys
 import time
@@ -25,6 +26,7 @@ from pathlib import Path
 
 import capturelib
 import vaultlib
+from commands import hot_path
 
 # A type directory's index section is its name title-cased, with overrides for
 # names that do not title-case cleanly. Unknown dirs (e.g. retro -> ## Retro)
@@ -54,6 +56,7 @@ CAPTURE_LOG_MAX_AGE_DAYS = 365
 WIKILINK = re.compile(r"\[\[([^\]]+)\]\]")
 INDEX_WARNING = "<!-- WARNING: index.md exceeded hot-path cap. Run /compass:consolidate before next session. -->"
 CATALOG_WARNING = "# WARNING: catalog exceeded cap. Run /compass:consolidate before next session."
+HOT_PATH_WARNING_PREFIX = "<!-- WARNING: hot path "
 
 # The minimal index.md /compass:setup writes for a new vault, reused here so
 # a vault synced before index.md exists gets the same shape rather than an
@@ -273,11 +276,14 @@ def _sync_catalog(vault_root, records):
     The empty-list marker `lessons: []` is replaced with the block-sequence
     header `lessons:` the moment any row sits under it, whether newly
     appended in this run or already present, so the file is always valid
-    YAML."""
+    YAML. Duplicate rows for one filename - a second writer inserting a row
+    the hook already appended - collapse to the first block, and the count
+    removed is returned so the repair is reported rather than silent."""
     catalog_path = vault_root / "meta" / "lessons-catalog.yaml"
     if not catalog_path.is_file():
-        return 0, []
-    text = catalog_path.read_text(encoding="utf-8")
+        return 0, [], 0
+    text = vaultlib.read_vault_text(catalog_path)
+    text, duplicates_removed = _collapse_duplicate_rows(text)
     existing = set(re.findall(r'file:\s*"?([^"\n]+)"?', text))
     by_filename = {}
     for record in records:
@@ -297,12 +303,40 @@ def _sync_catalog(vault_root, records):
             rows.append(row)
 
     corrupted = bool(existing) and bool(LESSONS_EMPTY_MARKER.search(text))
-    if rows or corrupted:
+    if rows or corrupted or duplicates_removed:
         text = LESSONS_EMPTY_MARKER.sub("lessons:", text, count=1)
         if rows:
             text = text.rstrip("\n") + "\n" + "\n".join(rows) + "\n"
         vaultlib.write_text_lf(catalog_path, text)
-    return len(rows), collisions
+    return len(rows), collisions, duplicates_removed
+
+
+CATALOG_ROW_START = re.compile(r"(?m)^(?=  - file: )")
+
+
+def _collapse_duplicate_rows(text):
+    """Keep the first row block per filename; return (text, removed).
+
+    A block starts at a line beginning with `  - file: ` and runs to the
+    next such line, so a `file:` token inside a summary string is never a
+    boundary. The first occurrence wins: it is the one the hook wrote from
+    the lesson's frontmatter."""
+    blocks = CATALOG_ROW_START.split(text)
+    if len(blocks) <= 2:
+        return text, 0
+    head, rows = blocks[0], blocks[1:]
+    seen, kept, removed = set(), [], 0
+    for block in rows:
+        match = re.match(r'  - file:\s*"?([^"\n]+)"?', block)
+        key = match.group(1) if match else block
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        kept.append(block)
+    if not removed:
+        return text, 0
+    return head + "".join(kept), removed
 
 
 def _sync_tag_index(vault_root, records):
@@ -324,6 +358,53 @@ def _sync_tag_index(vault_root, records):
     return len(tag_map)
 
 
+def _hot_path_marker(breakdown, total):
+    parts = ", ".join(f"{rel} {count}" for rel, count in breakdown)
+    return (
+        f"{HOT_PATH_WARNING_PREFIX}{total} / {hot_path.HOT_PATH_CAP} tokens "
+        f"({parts}). Run /compass:consolidate before next session. -->"
+    )
+
+
+def _hot_path_breakdown(vault_root, index_text):
+    """Per-file token counts for the hot path. index.md's text comes from the
+    caller so the count excludes any marker already prepended to it; counting
+    a marker would let it hold itself above the cap."""
+    breakdown = []
+    for rel in hot_path.HOT_PATH_FILES:
+        if rel == "index.md":
+            breakdown.append((rel, vaultlib.count_tokens(index_text)))
+            continue
+        path = vault_root / rel
+        if path.is_file():
+            breakdown.append((rel, vaultlib.count_tokens(path.read_text(encoding="utf-8"))))
+    return breakdown
+
+
+def _check_hot_path_cap(vault_root, index_path):
+    """Write, refresh, or clear index.md's aggregate hot-path marker.
+
+    Every component cap can pass while the three hot-path files together
+    breach the budget each turn pays for. This measures the total and records
+    the per-file breakdown that names which file to cut. The marker is
+    regenerated from current numbers and removed once the total is back under
+    the cap; index.md is rewritten only when its text actually changes."""
+    if not index_path.is_file():
+        return False
+    text = index_path.read_text(encoding="utf-8")
+    stripped = "\n".join(
+        line for line in text.split("\n")
+        if not line.startswith(HOT_PATH_WARNING_PREFIX)
+    )
+    breakdown = _hot_path_breakdown(vault_root, stripped)
+    total = sum(count for _, count in breakdown)
+    over = total > hot_path.HOT_PATH_CAP
+    desired = _hot_path_marker(breakdown, total) + "\n" + stripped if over else stripped
+    if desired != text:
+        vaultlib.write_text_lf(index_path, desired)
+    return over
+
+
 def _check_caps(vault_root, records):
     warnings = []
     index_path = vault_root / "index.md"
@@ -336,7 +417,7 @@ def _check_caps(vault_root, records):
 
     catalog_path = vault_root / "meta" / "lessons-catalog.yaml"
     if catalog_path.is_file():
-        ctext = catalog_path.read_text(encoding="utf-8")
+        ctext = vaultlib.read_vault_text(catalog_path)
         lesson_count = sum(
             1 for r in records
             if r["type_dir"] == "lessons" and r["_data"].get("status") != "archived"
@@ -349,6 +430,9 @@ def _check_caps(vault_root, records):
         if over_cat and CATALOG_WARNING not in ctext:
             vaultlib.write_text_lf(catalog_path, CATALOG_WARNING + "\n" + ctext)
             warnings.append("lessons-catalog.yaml")
+
+    if _check_hot_path_cap(vault_root, index_path):
+        warnings.append("hot path")
     return warnings
 
 
@@ -388,10 +472,13 @@ def _prune_capture_log(vault_root):
 
 def _clean_logs(vault_root):
     """Prune stale logs under `tmp/`: whole-file deletion of
-    `extraction-log-*.md` past `LOG_MAX_AGE_DAYS`, row-level pruning of
-    `capture-log.jsonl` past `CAPTURE_LOG_MAX_AGE_DAYS` - a much longer
-    horizon, since a fleet-wide fire-rate measurement needs to look back
-    further than one month. Returns `(extraction_deleted, capture_rows_pruned)`.
+    `extraction-log-*.md` and `worker-logs/*.log` past `LOG_MAX_AGE_DAYS`
+    (ADR-013 D-07's pruning clause - the worker's own per-run logs were
+    previously unowned), row-level pruning of `capture-log.jsonl` past
+    `CAPTURE_LOG_MAX_AGE_DAYS` - a much longer horizon, since a fleet-wide
+    fire-rate measurement needs to look back further than one month. Returns
+    `(extraction_deleted, capture_rows_pruned)`, where `extraction_deleted`
+    counts both log kinds swept on the same 30-day horizon.
     """
     tmp = vault_root / "tmp"
     if not tmp.is_dir():
@@ -402,6 +489,12 @@ def _clean_logs(vault_root):
         if log.is_file() and log.stat().st_mtime < cutoff:
             log.unlink()
             deleted += 1
+    worker_logs_dir = tmp / "worker-logs"
+    if worker_logs_dir.is_dir():
+        for log in worker_logs_dir.glob("*.log"):
+            if log.is_file() and log.stat().st_mtime < cutoff:
+                log.unlink()
+                deleted += 1
     return deleted, _prune_capture_log(vault_root)
 
 
@@ -410,12 +503,13 @@ def sync(vault_root):
     records = vaultlib.scan_artifacts(vault_root)
     _load_data(records)
     index_added = _sync_index(vault_root, records)
-    catalog_added, catalog_collisions = _sync_catalog(vault_root, records)
+    catalog_added, catalog_collisions, catalog_duplicates = _sync_catalog(vault_root, records)
     logs_deleted, capture_log_pruned = _clean_logs(vault_root)
     return {
         "index_added": index_added,
         "catalog_added": catalog_added,
         "catalog_collisions": catalog_collisions,
+        "catalog_duplicates_removed": catalog_duplicates,
         "tags": _sync_tag_index(vault_root, records),
         "caps": _check_caps(vault_root, records),
         "logs_deleted": logs_deleted,
@@ -431,6 +525,8 @@ def format_report(report):
         parts.append(f"catalog rows added: {report['catalog_added']}")
     for collision in report["catalog_collisions"]:
         parts.append(f"catalog filename collision: {collision}")
+    if report.get("catalog_duplicates_removed"):
+        parts.append(f"catalog duplicate rows removed: {report['catalog_duplicates_removed']}")
     parts.append(f"tags indexed: {report['tags']}")
     if report["caps"]:
         parts.append(f"caps exceeded (warning written): {', '.join(report['caps'])}")
@@ -452,7 +548,13 @@ def _record_write_signal(vault_root, norm):
     `handoffs/`, `vault-write` otherwise, keyed on the vault-relative POSIX
     path of the written file. Any failure here (a capturelib error, a
     corrupt state file) is swallowed - the sync report and exit code must
-    never depend on this bookkeeping."""
+    never depend on this bookkeeping.
+
+    Never called under `COMPASS_WORKER_SESSION` (ADR-013 D-11) - see `run`'s
+    hook branch. The worker's own vault writes (new lessons) still need the
+    index synced, which is why this function is skipped rather than the
+    whole hook branch: recording a signal here would manufacture the exact
+    due() evidence that reopens the capture loop on itself."""
     try:
         ref = norm.split(".compass/", 1)[-1]
         kind = "handoff-written" if ref.startswith("handoffs/") else "vault-write"
@@ -488,7 +590,8 @@ def run(args):
                 return 0  # not a vault write
             if _is_generated_output(file_path):
                 return 0  # loop guard: a fire triggered by our own write
-            _record_write_signal(vault_root, norm)
+            if not os.environ.get("COMPASS_WORKER_SESSION"):
+                _record_write_signal(vault_root, norm)
             sync(vault_root)
             sys.stdout.write(json.dumps({"suppressOutput": True}))
             return 0

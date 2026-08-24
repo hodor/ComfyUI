@@ -22,9 +22,10 @@ COMMAND_SPECS = [
     ("next-num", "Print the next local artifact number for a type."),
     ("tree", "Render the hierarchical spec/folder tree."),
     ("hot-path", "Print the hot-path token count against the cap."),
-    ("promote", "Move a flat spec into a folder and rewrite inbound wikilinks."),
+    ("promote", "Move a flat spec into a folder and rewrite inbound wikilinks (dry-run; --apply to write)."),
+    ("demote", "Move a childless folder spec back into a flat file, the inverse of promote (dry-run; --apply to write)."),
     ("unit-check", "Report unit-promotion candidates: 3+ artifact types tracing to one spec via depends_on."),
-    ("make-unit", "Create a unit folder and git-move named artifacts into it, rewriting the root index (dry-run; --apply to write)."),
+    ("make-unit", "Create a unit folder, optionally git-moving named artifacts into it and rewriting the root index; --undo reverses it (dry-run; --apply to write)."),
     ("clean-tmp", "Delete extraction logs older than 30 days."),
     ("touched", "Record a working-set marker for admission control."),
     ("admit-check", "Exit 0/1 for whether a spec may enter the hot path."),
@@ -39,11 +40,13 @@ COMMAND_SPECS = [
     ("capture-check", "Bump the turn counter, evaluate due(), and emit the Stop-hook block contract on a capture opportunity. Hook entry point."),
     ("capture-stats", "Report opportunities opened, fire rate, write rate, and per-trigger breakdown from the capture trace log."),
     ("capture-close", "Close a capture opportunity with an outcome and candidate/written/recurrence/rejected/revised/archived/error counts."),
+    ("capture-worker", "Run the extract-lessons pass against an opportunity in a spawned headless child; writes only worker-finished/worker-failed ledger rows. Detached-worker entry point."),
     ("doctor", "Diagnose install drift: plugin.yaml, hook registration, CLI completeness, agents/skills, lessons catalog. Exit 1 on any FAIL."),
     ("lessons", "Ranked catalog rows for an area, tag set, free text, or a document. Exit 1 on a malformed catalog row or missing catalog."),
     ("lesson-coverage", "Report cited, surfaced-but-uncited, and unresolvable lesson citations for a plan's `lessons:` fields. Advisory: exit 1 only on an unresolvable citation."),
     ("test-checkpoint", "record | verify | open-ids for pre-build failing-test checkpoints, tamper-evident against git. Never exits 2."),
     ("test-smells", "AST-based test-smell checks over test files: empty test, duplicate assert, literal-only assertion (gate), assertion-free (advisory). Exit 1 on any gate finding, never 2."),
+    ("sizing", "stats reports the sizing-log.yaml decision/correction record: by shape, by provenance, and a qualified correction rate."),
 ]
 
 
